@@ -176,6 +176,72 @@ export type WalletGrantPermissionsReturnType = {
     | undefined
 }
 
+/** JSON-safe session-policy-v1 configuration. All integers are hex quantities. */
+export type WalletRequestActorPolicy = {
+  version: 'session-policy-v1'
+  data: {
+    tokenLimits?:
+      | readonly {
+          token: Address
+          /** uint160 spend cap. */
+          limit: Hex
+          /** uint40 seconds; omitted means one-time. */
+          period?: Hex | undefined
+        }[]
+      | undefined
+    callScopes?:
+      | readonly {
+          target: Address
+          selectorRules?:
+            | readonly {
+                selector: Hex
+                recipients?: readonly Address[] | undefined
+              }[]
+            | undefined
+        }[]
+      | undefined
+  }
+}
+
+/** Proposed, experimental wallet_requestActor request. */
+export type WalletRequestActorParameters = {
+  account?: Address | undefined
+  /** Positive, safe integer chain ID, hex-encoded. */
+  chainId: Hex
+  actor: { actorId: Hex; authenticator: Address }
+  /** Policy-gated scope bitmask, hex-encoded. */
+  scope: Hex
+  /** Finite uint40 expiry in unix seconds, hex-encoded. */
+  expiry: Hex
+  policy: WalletRequestActorPolicy
+}
+
+/** Only authorize operations are permitted by wallet_requestActor v1. */
+export type WalletRequestActorChange = {
+  changeType: '0x0'
+  actorId: Hex
+  authenticator: Address
+  scope: Hex
+  expiry: Hex
+  policyData: Hex
+}
+
+/** One scoped grant, optionally preceded by its manager's OPERATOR registration. */
+export type WalletRequestActorReturnType = {
+  account: Address
+  chainId: Hex
+  signedAccountChanges: {
+    type: 'config'
+    channel: 'local'
+    /** uint64 with the unsequenced low-half sentinel. */
+    sequence: Hex
+    changes: readonly WalletRequestActorChange[]
+    /** authenticator || raw account-change signature; not a message envelope. */
+    signature: Hex
+  }
+  permissionsContext: Hex
+}
+
 export type WalletGetAssetsParameters = {
   account: Address
   assetFilter?:
@@ -2027,6 +2093,18 @@ export type WalletRpcSchema = [
     Method: 'wallet_grantPermissions'
     Parameters?: [WalletGrantPermissionsParameters]
     ReturnType: Prettify<WalletGrantPermissionsReturnType>
+  },
+  /**
+   * @description Experimental EIP-8130 scoped actor authorization request.
+   * @link https://github.com/base/eip-8130
+   * @example
+   * provider.request({ method: 'wallet_requestActor', params: [{ ... }] })
+   * // => { ... }
+   */
+  {
+    Method: 'wallet_requestActor'
+    Parameters: [WalletRequestActorParameters]
+    ReturnType: Prettify<WalletRequestActorReturnType>
   },
   /**
    * @description Requests the given permissions from the user.

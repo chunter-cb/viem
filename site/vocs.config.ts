@@ -1681,6 +1681,10 @@ export default defineConfig({
               link: '/eip8130/session-keys',
             },
             {
+              text: 'JIT Actor Authorization',
+              link: '/eip8130/jit-actor-authorization',
+            },
+            {
               text: 'Sub Accounts',
               link: '/eip8130/sub-accounts',
             },

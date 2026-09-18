@@ -85,6 +85,7 @@ export {
   type IsLockedReturnType,
   isLocked,
 } from './actions/isLocked.js'
+export { requestActor } from './actions/requestActor.js'
 export {
   type PrepareTransactionRequestParameters,
   prepareTransactionRequest,
@@ -105,6 +106,28 @@ export {
   type WaitForTransactionReceiptReturnType,
   waitForTransactionReceipt,
 } from './actions/waitForTransactionReceipt.js'
+export {
+  type ActorAuthorizationIdentity,
+  type ActorAuthorizationPolicy,
+  type ActorAuthorizationPolicyVersion,
+  actorAuthorizationContextMagic,
+  actorAuthorizationPolicyVersions,
+  type FulfillRequestActorErrorType,
+  type FulfillRequestActorParameters,
+  type FulfillRequestActorReturnType,
+  fulfillRequestActor,
+  type ParseActorAuthorizationContextReturnType,
+  parseActorAuthorizationContext,
+  type RequestActorParameters,
+  type RequestActorReturnType,
+  type ToActorAuthorizationContextParameters,
+  toActorAuthorizationContext,
+} from './actorAuthorization.js'
+export {
+  parseRequestActorParameters,
+  serializeRequestActorParameters,
+  serializeRequestActorResult,
+} from './actorAuthorizationRpc.js'
 export {
   type Eip8130Capabilities,
   type Eip8130CapabilitiesParameters,

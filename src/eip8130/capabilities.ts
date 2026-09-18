@@ -12,8 +12,13 @@ export const supportedPermissionTypes = [
   'contract-call',
 ] as const
 
-/** ERC-7715 policy types the session-policy mapping enforces. */
-export const supportedPolicyTypes = ['token-allowance', 'rate-limit'] as const
+/**
+ * ERC-7715 policy types the session-policy mapping enforces. `rate-limit` and
+ * `gas-limit` are intentionally excluded: neither can be exactly enforced by a
+ * `SessionPolicy` spend cap (see {@link toSessionPolicyConfig}), so
+ * `fulfillGrantPermissions` rejects them rather than silently ignoring them.
+ */
+export const supportedPolicyTypes = ['token-allowance'] as const
 
 /** ERC-7715 signer types accepted for a grant (a session key address). */
 export const supportedSignerTypes = ['account', 'key'] as const

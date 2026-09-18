@@ -30,9 +30,9 @@ import { actorIdFromAddress } from './utils/actorId.js'
 
 /**
  * A client whose `eth_call` decodes `getActorConfig` and returns an actor with
- * the given `authenticator` (zero = unregistered).
+ * the given `authenticator` (zero = no-live configuration).
  */
-function actorConfigClient(authenticator: string) {
+function actorConfigClient(authenticator: string, scope = 0) {
   return createClient({
     chain: mainnet,
     transport: custom({
@@ -46,7 +46,7 @@ function actorConfigClient(authenticator: string) {
           return encodeFunctionResult({
             abi: keystoreAbi as Abi,
             functionName,
-            result: { authenticator, expiry: 0, scope: 0 } as never,
+            result: { authenticator, expiry: 0, scope } as never,
           })
         }
         throw new Error(`unexpected RPC: ${method}`)
@@ -94,22 +94,19 @@ describe('toSessionPolicyConfig', () => {
     })
   })
 
-  test('rate-limit interval → recurring period (subscription)', () => {
-    const config = toSessionPolicyConfig([
-      {
-        type: 'erc20-token-transfer',
-        data: { address: usdc, ticker: 'USDC' },
-        policies: [
-          { type: 'token-allowance', data: { allowance: 100_000_000n } },
-          { type: 'rate-limit', data: { count: 1, interval: 7 * 86400 } },
-        ],
-      },
-    ])
-    expect(config.tokenLimits?.[0]).toEqual({
-      token: usdc,
-      limit: 100_000_000n,
-      period: 604_800n,
-    })
+  test('rate-limit policy is rejected (call-frequency ≠ recurring spend)', () => {
+    expect(() =>
+      toSessionPolicyConfig([
+        {
+          type: 'erc20-token-transfer',
+          data: { address: usdc, ticker: 'USDC' },
+          policies: [
+            { type: 'token-allowance', data: { allowance: 100_000_000n } },
+            { type: 'rate-limit', data: { count: 1, interval: 7 * 86400 } },
+          ],
+        },
+      ]),
+    ).toThrow(/rate-limit/)
   })
 
   test('native-token-transfer → native (zero address) tokenLimit', () => {
@@ -150,20 +147,31 @@ describe('toSessionPolicyConfig', () => {
     })
   })
 
-  test('gas-limit policy is ignored (settled by payer layer)', () => {
-    const config = toSessionPolicyConfig([
-      {
-        type: 'erc20-token-transfer',
-        data: { address: usdc, ticker: 'USDC' },
-        policies: [
-          { type: 'token-allowance', data: { allowance: 5n } },
-          { type: 'gas-limit', data: { limit: 21_000n } },
-        ],
-      },
-    ])
-    expect(config.tokenLimits).toEqual([
-      { token: usdc, limit: 5n, period: undefined },
-    ])
+  test('gas-limit policy is rejected (not enforced by the session policy)', () => {
+    expect(() =>
+      toSessionPolicyConfig([
+        {
+          type: 'erc20-token-transfer',
+          data: { address: usdc, ticker: 'USDC' },
+          policies: [
+            { type: 'token-allowance', data: { allowance: 5n } },
+            { type: 'gas-limit', data: { limit: 21_000n } },
+          ],
+        },
+      ]),
+    ).toThrow(/gas-limit/)
+  })
+
+  test('contract-call with any policies is rejected (nothing enforces them)', () => {
+    expect(() =>
+      toSessionPolicyConfig([
+        {
+          type: 'contract-call',
+          data: { address: nft, calls: ['mint(address)'] },
+          policies: [{ type: 'gas-limit', data: { limit: 21_000n } }],
+        },
+      ]),
+    ).toThrow(/contract-call/)
   })
 
   test('throws when a transfer permission has no allowance', () => {
@@ -272,7 +280,12 @@ describe('fulfillGrantPermissions', () => {
   test('manager not registered → managerChange folded into the batch', async () => {
     const client = actorConfigClient(zeroAddress)
     const { change, managerChange, changes, session } =
-      await fulfillGrantPermissions(client, { account, grantee, permissions })
+      await fulfillGrantPermissions(client, {
+        account,
+        grantee,
+        permissions,
+        approveManagerRegistration: true,
+      })
 
     // A k1-operator registration for the manager is included first.
     expect(managerChange).toBeDefined()
@@ -284,6 +297,27 @@ describe('fulfillGrantPermissions', () => {
     expect(changes).toEqual([managerChange, change])
   })
 
+  test('no-live manager requires explicit registration/reactivation consent', async () => {
+    await expect(
+      fulfillGrantPermissions(actorConfigClient(zeroAddress), {
+        account,
+        grantee,
+        permissions,
+      }),
+    ).rejects.toThrow(/approveManagerRegistration/)
+  })
+
+  test('live manager with other authenticator is never overwritten', async () => {
+    await expect(
+      fulfillGrantPermissions(actorConfigClient(usdc), {
+        account,
+        grantee,
+        permissions,
+        approveManagerRegistration: true,
+      }),
+    ).rejects.toThrow(/refusing to overwrite/)
+  })
+
   test('manager already registered → no managerChange', async () => {
     const client = actorConfigClient(ecrecoverAuthenticator)
     const { change, managerChange, changes } = await fulfillGrantPermissions(
@@ -292,6 +326,15 @@ describe('fulfillGrantPermissions', () => {
     )
     expect(managerChange).toBeUndefined()
     expect(changes).toEqual([change])
+  })
+
+  test('live insufficient manager scope is not silently upgraded', async () => {
+    await expect(
+      fulfillGrantPermissions(
+        actorConfigClient(ecrecoverAuthenticator, actorScope.policy),
+        { account, grantee, permissions, approveManagerRegistration: true },
+      ),
+    ).rejects.toThrow(/insufficient scope/)
   })
 
   test('assumeManagerRegistered skips the on-chain read', async () => {

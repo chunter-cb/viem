@@ -28,8 +28,10 @@ export type GetActorConfigReturnType = {
 }
 
 /**
- * Reads an actor's configuration (authenticator, scope, expiry, policy type)
- * from the `Keystore` system contract (`getActorConfig`). Use it to
+ * Reads an actor's live configuration (authenticator, scope, expiry)
+ * from the `Keystore` system contract (`getActorConfig`). Absent, revoked, disabled,
+ * and expired actors all return zero configuration. Expiry is live through equality
+ * with block.timestamp. These states cannot be distinguished via this getter. Use it to
  * inspect owners / session keys, e.g. to enrich a "sign with" picker.
  *
  * @example

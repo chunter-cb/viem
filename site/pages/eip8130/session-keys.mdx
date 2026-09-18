@@ -149,14 +149,14 @@ const hash = await sendTransaction(client, {
 
 A transfer that exceeds the weekly limit, or targets a contract/selector outside the allowlist, reverts inside the manager — so the key can only ever act within its committed policy.
 
-## Fulfilling an ERC-7715 request
+## Fulfilling an ERC-7715 Request
 
 When a dApp asks a wallet for permissions via [ERC-7715](https://eips.ethereum.org/EIPS/eip-7715) `wallet_grantPermissions`, the request arrives as a set of `permissions` (+ policies) and a top-level `expiry`. `fulfillGrantPermissions` lowers that request directly onto the EIP-8130 primitives above — building the `SessionPolicyConfig`, binding it, and returning the ready-to-sign `changes`. It supports two roles, both **POLICY-gated** to the same committed policy:
 
 - `role: 'session'` (default) — a **key on the account**. The protocol dispatches its calls as the account (`PolicyManager.execute`). Uses a secp256k1 (`k1`) actor.
 - `role: 'pull'` — an **external caller** (e.g. a subscription provider) that draws against the policy via `PolicyManager.executeFor` from its own address. Uses the `externalPolicyAuthenticator` sentinel actor, which can *only* act through the external-pull path.
 
-The single `expiry` drives **both** the actor authorization and the policy binding's `validUntil`, so they can't drift. The action also reads the account and, if the policy manager isn't yet a k1 operational actor (`key.k1(manager)`, required so its forwarded `executeBatch` can land), folds that one-time registration into `changes` — so a single `account.change(changes)` provisions the manager *and* authorizes the grantee:
+The single `expiry` drives **both** the actor authorization and the policy binding's `validUntil`. The action reads the live manager configuration. A zero result covers absent, revoked, disabled, or expired managers and requires explicit `approveManagerRegistration: true` consent to register/reactivate the manager as an unbounded k1 OPERATOR. A live manager with insufficient scope or another authenticator is rejected; admin scope `0` is already operational. The approved registration is included in `changes` before the grantee authorization:
 
 ```ts
 import { parseUnits } from 'viem'
@@ -169,12 +169,11 @@ const { changes, session } = await fulfillGrantPermissions(client, {
   expiry: Math.floor(Date.now() / 1000) + 7 * 86_400,
   permissions: [
     {
-      // ≤ 100 USDC / week (a recurring "subscription")
+      // ≤ 100 USDC, one-time (bounded by `expiry` above)
       type: 'erc20-token-transfer',
       data: { address: usdc, ticker: 'USDC' },
       policies: [
         { type: 'token-allowance', data: { allowance: parseUnits('100', 6) } },
-        { type: 'rate-limit', data: { count: 1, interval: 7 * 86_400 } },
       ],
     },
   ],
@@ -203,7 +202,7 @@ await account.change(pull.changes)
 ```
 
 :::info
-The manager registration is checked on-chain and included automatically only when missing. Pass `assumeManagerRegistered: true` to skip the read when you already know it's provisioned.
+The manager registration is checked on-chain and included only after explicit registration/reactivation consent. The legacy `assumeManagerRegistered: true` escape hatch still skips the read. The actor-native helper never skips it. See [JIT Actor Authorization](/eip8130/jit-actor-authorization#replay-and-durable-revocation) for replay and durable revocation requirements.
 :::
 
 ### Redeeming a grant
@@ -245,11 +244,13 @@ The permission → policy mapping is:
 | --- | --- |
 | `native-token-transfer` + `token-allowance` | native-ETH `tokenLimit` (gated on each call's `value`) |
 | `erc20-token-transfer` + `token-allowance` | ERC-20 `tokenLimit` **and** a `callScope` for `transfer`/`transferFrom` on the token |
-| `contract-call` `{ address, calls }` | a `callScope` restricting the key to those selectors on the target |
-| `rate-limit` `interval` (on a transfer) | the cap's reset `period` (a recurring allowance) |
-| `gas-limit` | ignored — gas is settled by the payer / [ERC-8168](/eip8168) layer |
+| `contract-call` `{ address, calls }` (no policies) | a `callScope` restricting the key to those selectors on the target |
 
-A transfer permission without a `token-allowance` throws (an unbounded spend can't be safely granted), as do `custom` permissions/policies — build the `SessionPolicyConfig` explicitly for those. Use `toSessionPolicyConfig` (the pure mapping) or `toSessionPolicy` (mapping + binding) directly if you only need the lowered config or the bound policy without the `authorizeActor` change.
+Every lowered cap is one-time (no reset `period`) and bounded only by the top-level `expiry`. A transfer permission without a `token-allowance` throws (an unbounded spend can't be safely granted), as do `custom` permissions/policies, a `rate-limit` or `gas-limit` policy on a transfer, or *any* policy on a `contract-call` permission: none of these can be exactly enforced by a `SessionPolicy` spend cap, so they are rejected rather than silently dropped or reinterpreted (a call-frequency `rate-limit` is **not** the same constraint as a recurring spend `period`). Build the `SessionPolicyConfig` explicitly (setting `TokenLimit.period` directly) if you need a genuine recurring budget. Use `toSessionPolicyConfig` (the pure mapping) or `toSessionPolicy` (mapping + binding) directly if you only need the lowered config or the bound policy without the `authorizeActor` change.
+
+:::info[Compatibility]
+Prior versions of `fulfillGrantPermissions` silently lowered a `rate-limit` policy's `interval` into the cap's reset `period` (ignoring `count`) and silently dropped `gas-limit` policies and any policies on a `contract-call` permission. Each of these was a fail-open bug: the wallet could end up granting broader or different authority than the dApp's request implied. These combinations now throw instead. No-live manager registration/reactivation also requires explicit `approveManagerRegistration: true`; it is no longer added implicitly.
+:::
 
 ## Advertising support (EIP-5792)
 

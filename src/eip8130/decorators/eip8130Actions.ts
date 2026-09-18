@@ -12,6 +12,7 @@ import { getTransaction } from '../actions/getTransaction.js'
 import { getTransactionCount } from '../actions/getTransactionCount.js'
 import { isActor } from '../actions/isActor.js'
 import { isLocked } from '../actions/isLocked.js'
+import { requestActor } from '../actions/requestActor.js'
 import {
   prepareTransactionRequest,
   sendTransaction,
@@ -64,6 +65,12 @@ export type Eip8130Actions = {
     getSessionSpend: Bound<typeof getSessionSpend>
     /** Verify an EIP-8130 signature envelope; returns the resolved actor + scope. */
     validateSignature: Bound<typeof validateSignature>
+    /**
+     * Request a wallet authorize a specific, app-controlled actor identity as
+     * a scoped, finitely-expiring, policy-gated JIT actor (proposed,
+     * experimental `wallet_requestActor`).
+     */
+    requestActor: Bound<typeof requestActor>
   }
 }
 
@@ -118,6 +125,7 @@ export function eip8130Actions() {
       getLockStatus: (parameters) => getLockStatus(client, parameters),
       getSessionSpend: (parameters) => getSessionSpend(client, parameters),
       validateSignature: (parameters) => validateSignature(client, parameters),
+      requestActor: (parameters) => requestActor(client, parameters),
     },
   })
 }

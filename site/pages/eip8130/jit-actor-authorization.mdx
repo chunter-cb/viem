@@ -1,0 +1,175 @@
+---
+description: Request a scoped EIP-8130 actor authorization for just-in-time use
+---
+
+# JIT Actor Authorization
+
+## Overview
+
+:::warning[Experimental]
+`wallet_requestActor` is a proposed wallet extension, not a finalized standard. It requires an EIP-8130-enabled chain and compatible wallet, account, manager, and policy contracts. Reference policy contracts are unaudited; wallets must choose deployments they trust.
+:::
+
+An app supplies an actor identity it already controls, an exact chain, a policy-gated scope, a finite expiry, and a `session-policy-v1` configuration. [`requestActor`](#request-and-prepare-first-use) returns a signed account-change batch for later inclusion in a transaction. The wallet neither creates the app's key nor returns a redeemable session ID. The older [`fulfillGrantPermissions`](/eip8130/session-keys#fulfilling-an-erc-7715-request) also authorizes a supplied grantee; it does not mint private keys.
+
+The request's integers, including token limits and periods, are hex quantities on the JSON wire. [`parseRequestActorParameters`](#fulfill-an-approved-request) and [`serializeRequestActorResult`](#fulfill-an-approved-request) handle conversion for wallets. `session-policy-v1` accepts only the documented [`SessionPolicyConfig`](/eip8130/session-keys#author--bind) fields; unsupported versions or constraints fail closed.
+
+## Recipes
+
+These recipes assume [EIP-8130 client setup](/eip8130), an existing account, and trusted signer handles. No transaction is broadcast by either recipe.
+
+### Request and Prepare First Use
+
+This function takes an app-controlled k1 signer and a separate funded payer. For P-256 or WebAuthn, use the corresponding [`key`](/eip8130/rotating-owners) identity and signer. [`parseActorAuthorizationContext`](#response-validation) reconstructs the approved manager call. [`toAccount`](/eip8130/creating-an-account) must declare the granted scope before the actor is installed, so [`prepareTransactionRequest`](/eip8130/sending-a-transaction) selects the correct nonce mode. [`encodeWalletCalls`](/eip8130/sending-a-transaction) converts the call phases into wire form.
+
+```ts
+import {
+  type Address, type Chain, type Client, type Transport,
+  encodeFunctionData, erc20Abi, parseUnits,
+} from 'viem'
+import {
+  type Signer, actorScope, encodeWalletCalls, key,
+  parseActorAuthorizationContext, prepareTransactionRequest,
+  requestActor, toAccount,
+} from 'viem/eip8130'
+
+export async function prepareActorTransfer(options: {
+  client: Client<Transport, Chain>
+  walletClient: Client<Transport, Chain>
+  accountAddress: Address
+  actorSigner: Signer
+  payerSigner: Signer
+  token: Address
+  recipient: Address
+}) {
+  const { client, walletClient, accountAddress, actorSigner, payerSigner, token, recipient } = options
+  const actor = key.k1(actorSigner.address)
+  const response = await requestActor(walletClient, {
+    account: accountAddress,
+    chainId: client.chain.id,
+    actor,
+    scope: actorScope.policy,
+    expiry: Math.floor(Date.now() / 1000) + 3600,
+    policy: {
+      version: 'session-policy-v1',
+      data: {
+        tokenLimits: [{ token, limit: parseUnits('10', 6) }],
+        callScopes: [{
+          target: token,
+          selectorRules: [{ selector: '0xa9059cbb', recipients: [recipient] }],
+        }],
+      },
+    },
+  })
+  const context = parseActorAuthorizationContext(response.permissionsContext)
+  const sessionAccount = toAccount({
+    address: response.account,
+    signer: actorSigner,
+    actorId: context.actor.actorId,
+    authenticator: context.actor.authenticator,
+    scope: context.scope,
+  })
+  const call = context.session.executeCall({
+    target: token,
+    data: encodeFunctionData({
+      abi: erc20Abi,
+      functionName: 'transfer',
+      args: [recipient, parseUnits('1', 6)],
+    }),
+  })
+  const payer = { account: payerSigner }
+  const prepared = await prepareTransactionRequest(client, {
+    account: sessionAccount,
+    accountChanges: [response.signedAccountChanges],
+    calls: encodeWalletCalls({ account: response.account, calls: [[call]] }),
+    payer,
+    gas: 250_000n, // Estimate/tune for your deployment.
+    maxFeePerGas: 1_000_000_000n,
+    maxPriorityFeePerGas: 1n,
+  })
+  const serialized = await sessionAccount.signTransaction(prepared, { payer })
+  return { response, serialized }
+}
+```
+
+The example assumes a six-decimal token. Retain the response for reuse, but prepare and sign a fresh transaction near submission: a POLICY-only actor uses nonce-free transactions with a short millisecond deadline, independently of the grant's seconds-based expiry. To submit, use [`sendRawTransaction`](/docs/actions/wallet/sendRawTransaction) on the matching chain. The batch already contains any explicitly approved manager prerequisite.
+
+### Fulfill an Approved Request
+
+A wallet calls [`fulfillRequestActor`](#fulfill-an-approved-request) **only after** displaying and approving the parsed identity, chain, exact scope, expiry, and policy. Parsing alone is not consent. The wallet must select the account, admin signer, authenticators, manager, and policy it trusts. Never spread a raw request into trusted options.
+
+```ts
+import type {
+  Address, Chain, Client, Transport, WalletRequestActorParameters,
+} from 'viem'
+import {
+  type Signer, fulfillRequestActor, parseRequestActorParameters,
+  serializeRequestActorResult,
+} from 'viem/eip8130'
+
+export async function fulfillApprovedActorRequest(
+  wire: WalletRequestActorParameters,
+  trusted: {
+    client: Client<Transport, Chain>
+    account: Address
+    signer: Signer
+    manager: Address
+    policy: Address
+    approveManagerRegistration: boolean
+    allowSelfPayer: boolean
+  },
+) {
+  const approved = parseRequestActorParameters(wire)
+  // The wallet's approval flow must have approved these exact parsed fields.
+  if (approved.account && approved.account.toLowerCase() !== trusted.account.toLowerCase())
+    throw new Error('Approved account mismatch.')
+  const result = await fulfillRequestActor(trusted.client, {
+    account: trusted.account,
+    signer: trusted.signer,
+    chainId: approved.chainId,
+    actor: {
+      actorId: approved.actor.actorId,
+      authenticator: approved.actor.authenticator,
+    },
+    scope: approved.scope,
+    expiry: approved.expiry, // Preserve it; do not compute another now + duration.
+    policyVersion: approved.policy.version,
+    policyConfig: approved.policy.data,
+    manager: trusted.manager,
+    policy: trusted.policy,
+    approveManagerRegistration: trusted.approveManagerRegistration,
+    allowSelfPayer: trusted.allowSelfPayer,
+  })
+  return serializeRequestActorResult(result)
+}
+```
+
+Fulfillment checks the configured and actual RPC chain before reading manager/actor state and the local epoch. It rejects manager/self identity collisions and live admin or different-authenticator replacements. Renewal of the same-authenticator scoped actor is permitted.
+
+The Keystore's [`getActorConfig`](/eip8130/rotating-owners) is **liveness-filtered**: missing, revoked, disabled, and expired all read as zero. An actor is live through equality with its expiry. A no-live manager requires separate `approveManagerRegistration: true` consent to register/reactivate an **unbounded OPERATOR**, not merely the app's scoped grant. A live manager with the wrong authenticator or insufficient scope is rejected without upgrading it. Admin scope `0` is already operational. The new helper has no `assumeManagerRegistered` escape hatch.
+
+## Best Practices
+
+### Response Validation
+
+The app checks the requested account, chain, actor, scope, expiry, canonical policy configuration, and immediate activation (`validAfter = 0`). Only one grant, optionally preceded by the exact manager OPERATOR prerequisite, is accepted. Context encoding rejects inconsistent bindings and unsupported policy types.
+
+These are consistency checks, **not cryptographic verification**. The chain authenticates the raw batch on submission. [`validateSignature`](/eip8130/signing-messages) uses an application-message envelope and a different digest; it is not a verifier for this signed batch.
+
+### Replay and Durable Revocation
+
+An unsequenced local batch is signed at `(localEpoch << 32) | 0xffffffff`. Inclusion does **not** consume it: it remains replayable after landing, until the epoch changes. The Keystore skips an expired authorization **per operation**. Consequently, an unbounded manager registration sibling remains replayable even after the app actor expires. Approve this broad prerequisite deliberately.
+
+For durable teardown of an installed actor with an outstanding replayable grant, combine [`incrementLocalEpoch` and `revokeActor`](/eip8130/rotating-owners). Revocation alone can be undone by replay; an epoch bump alone invalidates old local signatures but does not remove installed actors. Epoch advancement affects all signatures from the prior local epoch, including other apps' grants. Remove the manager separately if intended, considering other actors that depend on it.
+
+### Preserve Budget Identity
+
+The exact commitment is `keccak256(abi.encode(account, policy, keccak256(policyConfig), validAfter, validUntil, salt))`. Manager is not in that formula; it is separately bound alongside the commitment in the actor's `policyData`. The manager tracks spend by binding identity. Reuse the same binding and default `salt: 0n` for the same logical grant rather than randomizing salt per execution. An actor ID identifies one shared slot per account: renewed authorizations overwrite it, and older unsequenced grants may still overwrite renewals unless invalidated by an epoch bump.
+
+Keep `SELF_PAYER` off unless separately approved with `allowSelfPayer: true`: policy token limits do not cap gas spend. Otherwise provide `payer: { account: payerSigner }`.
+
+## See More
+
+- [Session Keys](/eip8130/session-keys): declarative policy configuration and the ERC-7715 adapter.
+- [Rotating Owners](/eip8130/rotating-owners): actor changes and epoch invalidation.
+- [Sending a Transaction](/eip8130/sending-a-transaction): account changes, payer signatures, and nonce modes.
