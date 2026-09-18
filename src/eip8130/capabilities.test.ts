@@ -24,11 +24,12 @@ describe('eip8130Capabilities', () => {
     })
   })
 
-  test('does not advertise custom / gas-limit (not safely lowerable)', () => {
+  test('does not advertise custom / gas-limit / rate-limit (not safely lowerable)', () => {
     const { permissions } = eip8130Capabilities()
     expect(permissions.permissionTypes).not.toContain('custom')
     expect(permissions.policyTypes).not.toContain('custom')
     expect(permissions.policyTypes).not.toContain('gas-limit')
+    expect(permissions.policyTypes).not.toContain('rate-limit')
   })
 
   test('paymasterService advertised only when set', () => {

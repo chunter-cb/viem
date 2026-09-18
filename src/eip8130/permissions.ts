@@ -56,23 +56,11 @@ function toSelector(signatureOrSelector: string): Hex {
   return toFunctionSelector(signatureOrSelector)
 }
 
-/**
- * Fold an ERC-7715 permission's policies into a `SessionPolicy` spend cap.
- *
- * - `token-allowance` → the per-period (or one-time) `limit`.
- * - `rate-limit` → the reset `period` (its `interval`, in seconds). The per-
- *   interval `count` has no `SessionPolicy` equivalent (the policy caps spend,
- *   not call frequency) and is ignored.
- * - `gas-limit` → ignored here (gas is settled by the payer / ERC-8168 layer,
- *   not the session policy).
- * - `custom` → rejected (cannot be safely lowered).
- */
+/** Lowers spend allowances only; call-frequency and gas constraints fail closed. */
 function spendFromPolicies(policies: readonly GrantedPolicy[]): {
   limit?: bigint | undefined
-  period?: bigint | undefined
 } {
   let limit: bigint | undefined
-  let period: bigint | undefined
   for (const policy of policies) {
     if (typeof policy.type === 'object')
       throw new BaseError(
@@ -84,15 +72,18 @@ function spendFromPolicies(policies: readonly GrantedPolicy[]): {
         limit = policy.data.allowance
         break
       case 'rate-limit':
-        period = BigInt(policy.data.interval)
-        break
+        throw new BaseError(
+          'Unsupported rate-limit: SessionPolicy caps spend, not call frequency.',
+        )
       case 'gas-limit':
-        break
+        throw new BaseError(
+          'Unsupported gas-limit: SessionPolicy does not cap gas spend.',
+        )
       default:
         throw new BaseError(`Unsupported ERC-7715 policy type: "${type}".`)
     }
   }
-  return { limit, period }
+  return { limit }
 }
 
 export type ToSessionPolicyConfigErrorType = BaseError
@@ -112,23 +103,28 @@ export type ToSessionPolicyConfigErrorType = BaseError
  * - `contract-call` → a `callScope` restricting the key to the given selectors
  *   on the target contract.
  *
- * A `rate-limit` policy on a transfer permission sets the cap's reset `period`
- * (a recurring allowance / "subscription"); without one the cap is one-time.
+ * The cap is always one-time (no reset `period`): `rate-limit` and `gas-limit`
+ * policies are rejected rather than lowered (see {@link spendFromPolicies}), and
+ * a `contract-call` permission may not carry any policies. A recurring budget
+ * (a reset `period`) is only available by building the {@link SessionPolicyConfig}
+ * explicitly (bypassing this lowering) with `TokenLimit.period` set.
  *
  * @throws if a transfer permission has no `token-allowance` (an unbounded spend
- * cannot be safely expressed), or if a `custom` permission/policy is present.
+ * cannot be safely expressed), if a `rate-limit` or `gas-limit` policy is
+ * present (neither can be exactly enforced by a `SessionPolicy`), if a
+ * `contract-call` permission carries any policies, or if a `custom`
+ * permission/policy is present.
  *
  * @example
  * import { toSessionPolicyConfig, encodeSessionPolicyConfig } from 'viem/eip8130'
  *
- * // "≤ 100 USDC / week" subscription for a session key
+ * // "≤ 100 USDC, one-time" cap for a session key
  * const config = toSessionPolicyConfig([
  *   {
  *     type: 'erc20-token-transfer',
  *     data: { address: usdc, ticker: 'USDC' },
  *     policies: [
  *       { type: 'token-allowance', data: { allowance: parseUnits('100', 6) } },
- *       { type: 'rate-limit', data: { count: 1, interval: 7 * 86400 } },
  *     ],
  *   },
  * ])
@@ -149,22 +145,22 @@ export function toSessionPolicyConfig(
     const type = permission.type
     switch (permission.type) {
       case 'native-token-transfer': {
-        const { limit, period } = spendFromPolicies(permission.policies)
+        const { limit } = spendFromPolicies(permission.policies)
         if (limit === undefined)
           throw new BaseError(
             'A `native-token-transfer` permission must include a `token-allowance` policy (an unbounded spend cannot be granted).',
           )
-        tokenLimits.push({ token: zeroAddress, limit, period })
+        tokenLimits.push({ token: zeroAddress, limit })
         break
       }
       case 'erc20-token-transfer': {
         const token = permission.data.address as Address
-        const { limit, period } = spendFromPolicies(permission.policies)
+        const { limit } = spendFromPolicies(permission.policies)
         if (limit === undefined)
           throw new BaseError(
             'An `erc20-token-transfer` permission must include a `token-allowance` policy (an unbounded spend cannot be granted).',
           )
-        tokenLimits.push({ token, limit, period })
+        tokenLimits.push({ token, limit })
         callScopes.push({
           target: token,
           selectorRules: erc20TransferSelectors.map((selector) => ({
@@ -174,6 +170,14 @@ export function toSessionPolicyConfig(
         break
       }
       case 'contract-call': {
+        // A bare call-scope grant has no spend to cap: any attached policy
+        // (rate-limit, gas-limit, token-allowance, custom, ...) would be
+        // silently dropped since nothing here enforces it. Reject rather than
+        // fail open.
+        if (permission.policies.length > 0)
+          throw new BaseError(
+            'A `contract-call` permission cannot carry policies: a `SessionPolicy` call scope has no spend/frequency enforcement to apply them to, so they would be silently ignored. Omit `policies` (pass `[]`) for a `contract-call` permission.',
+          )
         callScopes.push({
           target: permission.data.address as Address,
           selectorRules: permission.data.calls.map((call) => ({
@@ -299,9 +303,11 @@ export type FulfillGrantPermissionsParameters = Omit<
    * Skip the on-chain check for whether `manager` is registered as a k1
    * operational actor on the account (assume it already is). When `false`
    * (default), the account is read and a `managerChange` is included in `changes`
-   * if the manager still needs registering. @default false
+   * if registration/reactivation is explicitly approved. @default false
    */
   assumeManagerRegistered?: boolean | undefined
+  /** Explicit approval to register/reactivate a no-live manager as an unbounded OPERATOR. */
+  approveManagerRegistration?: boolean | undefined
 }
 
 export type FulfillGrantPermissionsReturnType = {
@@ -315,7 +321,7 @@ export type FulfillGrantPermissionsReturnType = {
   change: AaAuthorizeActor
   /**
    * Present iff the `manager` was not yet registered as a k1 operational actor
-   * on the account: the one-time `authorizeActor(key.k1(manager),
+   * on the account and registration/reactivation was approved: `authorizeActor(key.k1(manager),
    * { scope: actorScope.operator })` change the account needs so the manager's
    * forwarded `executeBatch` can land. Already included in {@link changes}.
    */
@@ -332,9 +338,9 @@ export type FulfillGrantPermissionsReturnType = {
   session: SessionPolicy
   /**
    * Opaque, self-describing ERC-7715 `permissionsContext` for this grant.
-   * Return it to the dApp; later `routePermissionedCalls` / `sendPermissionedCalls`
-   * decode it to route the granted key's calls through the manager — no wallet-
-   * side storage needed (see {@link parsePermissionsContext}).
+   * Return it to the dApp; later {@link routePermissionedCalls} decodes it (see
+   * {@link parsePermissionsContext}) and wraps the granted key's calls to send
+   * through the manager via `sendTransaction` — no wallet-side storage needed.
    */
   permissionsContext: Hex
 }
@@ -356,15 +362,16 @@ export type FulfillGrantPermissionsErrorType = ToSessionPolicyConfigErrorType
  *
  * For the manager's forwarded `executeBatch` to land, the account must register
  * the `manager` as a k1 operational actor (`key.k1(manager)` / `key.trustedExecutor`).
- * This action reads the account and, if that registration is missing, includes
- * it as `managerChange` at the front of `changes` — so a single
- * `account.change(changes)` both provisions the manager (once) and authorizes
+ * The liveness-filtered getter returns zero for absent/revoked/disabled/expired actors.
+ * With explicit `approveManagerRegistration`, this action includes
+ * registration as `managerChange` at the front of `changes` — so a single
+ * `account.change(changes)` signs both the manager registration and
  * the grantee. Pass `assumeManagerRegistered: true` to skip the read.
  *
  * @example
  * import { fulfillGrantPermissions } from 'viem/eip8130'
  *
- * // session key: "≤ 100 USDC / week", expires in 7 days
+ * // session key: "≤ 100 USDC, one-time", expires in 7 days
  * const { changes, session } = await fulfillGrantPermissions(client, {
  *   account: account.address,
  *   grantee: sessionKeyAddress,
@@ -375,12 +382,11 @@ export type FulfillGrantPermissionsErrorType = ToSessionPolicyConfigErrorType
  *       data: { address: usdc, ticker: 'USDC' },
  *       policies: [
  *         { type: 'token-allowance', data: { allowance: parseUnits('100', 6) } },
- *         { type: 'rate-limit', data: { count: 1, interval: 7 * 86_400 } },
  *       ],
  *     },
  *   ],
  * })
- * // provisions the manager (if needed) + authorizes the key, in one batch
+ * // Sign the batch; submit it in a transaction to apply the authorization.
  * await account.change(changes)
  * // later: session.executeCall({ target: usdc, data: transferCalldata })
  *
@@ -401,6 +407,7 @@ export async function fulfillGrantPermissions<
     permissions,
     expiry,
     assumeManagerRegistered = false,
+    approveManagerRegistration = false,
     ...rest
   } = parameters
   const expiryBig = expiry === undefined ? undefined : BigInt(expiry)
@@ -421,20 +428,30 @@ export async function fulfillGrantPermissions<
   })
 
   // Ensure the manager is a live k1 operator so its forwarded `executeBatch`
-  // can drive the account (DefaultAccount after #101); register it if not.
+  // can drive the account; require consent for no-live registration/reactivation.
   let managerChange: AaAuthorizeActor | undefined
   if (!assumeManagerRegistered) {
     const managerActor = key.k1(session.manager)
-    const { authenticator } = await getActorConfig(client, {
+    const { authenticator, scope } = await getActorConfig(client, {
       account,
       actorId: managerActor.actorId,
     })
-    const registered =
-      authenticator.toLowerCase() === ecrecoverAuthenticator.toLowerCase()
-    if (!registered)
+    if (authenticator.toLowerCase() === zeroAddress) {
+      if (approveManagerRegistration !== true)
+        throw new BaseError(
+          'No live manager; approveManagerRegistration is required to register/reactivate it.',
+        )
       managerChange = authorizeActor(managerActor, {
         scope: actorScope.operator,
       })
+    } else if (
+      authenticator.toLowerCase() !== ecrecoverAuthenticator.toLowerCase() ||
+      (scope !== 0 && !(scope & actorScope.operator))
+    ) {
+      throw new BaseError(
+        'Live manager has insufficient scope or a different authenticator; refusing to overwrite it.',
+      )
+    }
   }
 
   const changes = managerChange ? [managerChange, change] : [change]
