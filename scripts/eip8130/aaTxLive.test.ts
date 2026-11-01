@@ -24,6 +24,7 @@ import {
   eip8130ChainConfig,
   estimateGas,
   getTransaction,
+  getTransactionHash,
   nonceKeyMax,
   openPayer,
   register8130Chains,
@@ -34,6 +35,7 @@ import {
 } from '../../src/eip8130/index.js'
 import type { Hex } from '../../src/types/misc.js'
 import { defineChain } from '../../src/utils/chain/defineChain.js'
+import { keccak256 } from '../../src/utils/hash/keccak256.js'
 import { parseEther } from '../../src/utils/unit/parseEther.js'
 
 const RPC = process.env.VIBENET_RPC
@@ -341,6 +343,75 @@ describe.runIf(RPC && FAUCET_PK)('live: AA transaction type', () => {
     expect(receipt.eip8130.payer?.toLowerCase()).toBe(
       sponsor.address.toLowerCase(),
     )
+  }, 120_000)
+
+  test('transaction hash: known before the payer signs and excludes auth', async () => {
+    const sender = freshEoa()
+    const sponsorA = privateKeyToAccount(generatePrivateKey())
+    const sponsorB = privateKeyToAccount(generatePrivateKey())
+    await fund(sponsorA.address)
+    await fund(sponsorB.address)
+
+    const { prepareTransactionRequest } = await import(
+      '../../src/eip8130/actions/sendTransaction.js'
+    )
+    const { signTransaction } = await import(
+      '../../src/eip8130/utils/signTransaction.js'
+    )
+    const { parseTransaction } = await import(
+      '../../src/eip8130/utils/parseTransaction.js'
+    )
+    const tx = await prepareTransactionRequest(client, {
+      account: sender,
+      calls: [[{ to: sender.address }]],
+      gas: 200_000n,
+      ...(await fees()),
+    })
+    tx.payer = openPayer
+    const expected = await getTransactionHash({
+      transaction: tx,
+      sender: sender.address,
+    })
+
+    const senderSigned = await sender.signTransaction(tx)
+    const [a, b] = await Promise.all(
+      [sponsorA, sponsorB].map((sponsor) =>
+        signTransaction({
+          transaction: parseTransaction(senderSigned),
+          payer: { account: sponsor, address: openPayer },
+        }),
+      ),
+    )
+    expect(a).not.toBe(b)
+    expect(await getTransactionHash({ transaction: a! })).toBe(expected)
+    expect(await getTransactionHash({ transaction: b! })).toBe(expected)
+
+    const hash = await client.request({
+      method: 'eth_sendRawTransaction',
+      params: [a!],
+    })
+    expect(hash).toBe(expected)
+    expect(hash).not.toBe(keccak256(a!))
+
+    // The same body with a different payer_auth shares the hash: a duplicate.
+    const duplicate = await client
+      .request({ method: 'eth_sendRawTransaction', params: [b!] })
+      .then(
+        (result) => ({ result }),
+        (error: Error) => ({ error: error.message }),
+      )
+    console.log('same hash, other payer:', duplicate)
+    if ('result' in duplicate) expect(duplicate.result).toBe(expected)
+
+    const receipt = await waitForTransactionReceipt(client, { hash })
+    expect(receipt.status).toBe('0x1')
+    expect(receipt.transactionHash).toBe(expected)
+    expect((await getTransaction(client, { hash })).hash).toBe(expected)
+    expect(
+      [sponsorA.address, sponsorB.address]
+        .map((x) => x.toLowerCase())
+        .includes(receipt.eip8130.payer!.toLowerCase()),
+    ).toBe(true)
   }, 120_000)
 
   test('nonce-free: lands anchored to block time; expired validBefore is rejected', async () => {

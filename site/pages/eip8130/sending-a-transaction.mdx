@@ -158,6 +158,24 @@ const hash = await sendTransaction(client, {
 
 See [Sponsoring Transactions](/eip8130/sponsoring-transactions) for the co-signing mechanism (and token payment), and [Payer Services (ERC-8168)](/eip8130/payer-services) to negotiate sponsorship with a service.
 
+## Compute the Transaction Hash
+
+An EIP-8130 transaction hash is not `keccak256` of the encoded transaction. It is the sender signature hash with the resolved sender in the `sender` slot, so it excludes `sender_auth` and `payer_auth`. That makes it known before either signature exists, and a payer re-signing does not change it. A fee bump does change it.
+
+`getTransactionHash` computes it from a serializable transaction or from signed bytes. When `from` is empty, pass `sender` for an unsigned transaction, or let it recover the sender from `sender_auth`:
+
+```ts
+import { getTransactionHash } from 'viem/eip8130'
+
+// Before signing.
+const hash = await getTransactionHash({ transaction, sender: account.address })
+
+// From signed bytes, e.g. to look up a transaction a payer submitted.
+const sameHash = await getTransactionHash({ transaction: serialized })
+```
+
+Equal hashes do not mean equal bytes: encodings that differ only in their authorization share a hash, and at most one of them is included. Merkle proofs over the transactions trie still use the full encoding.
+
 ## Lower-Level Control
 
 `sendTransaction` composes two primitives you can use directly:
