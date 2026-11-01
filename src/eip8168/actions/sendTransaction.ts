@@ -27,6 +27,7 @@ import type {
 } from '../types.js'
 import {
   type ResignRequest,
+  type SendSponsoredCallsParameters,
   type SendSponsoredCallsReturnType,
   sendSponsoredCalls,
 } from './sendSponsoredCalls.js'
@@ -275,10 +276,11 @@ export type SendTransactionParameters = {
   retries?: number | undefined
   /** Gate for every re-sign (see {@link ResignRequest}). No callback ⇒ no retry. */
   confirmRetry?: (request: ResignRequest) => boolean | Promise<boolean>
-  /** Invoked with the resolved transaction just before each submit attempt. */
-  onTransaction?:
-    | ((transaction: TransactionSerializable8130) => void)
-    | undefined
+  /**
+   * Invoked with the resolved transaction and its transaction hash just before
+   * each submit attempt.
+   */
+  onTransaction?: SendSponsoredCallsParameters['onTransaction']
 }
 
 export type SendTransactionReturnType = SendSponsoredCallsReturnType
@@ -328,10 +330,10 @@ export type SendTransactionSyncReturnType = PayerSendTransactionReturnType & {
 
 /**
  * Sponsored send that waits for the receipt. Submits via the payer
- * (`payer_sendTransaction`, which returns the hash) and then awaits the
- * EIP-8130 receipt, threading the resolved `validBefore` for fast expiry
- * detection. The payer is the submitter, so this is always `mode: "send"`
- * (there is nothing to await in co-sign-only `"sign"` mode).
+ * (`payer_sendTransaction`) and then awaits the EIP-8130 receipt by the
+ * locally computed transaction hash, threading the resolved `validBefore` for
+ * fast expiry detection. The payer is the submitter, so this is always
+ * `mode: "send"` (there is nothing to await in co-sign-only `"sign"` mode).
  *
  * @example
  * const { transactionHash, receipt } = await sendTransactionSync(
@@ -352,7 +354,7 @@ export async function sendTransactionSync(
   const { pollingInterval, timeout, ...rest } = parameters
 
   let validBefore: bigint | undefined
-  const result = await sendTransaction(client, {
+  const { transactionHash } = await sendTransaction(client, {
     ...rest,
     mode: 'send',
     onTransaction: (tx) => {
@@ -360,18 +362,12 @@ export async function sendTransactionSync(
     },
   })
 
-  // `mode: 'send'` always resolves to the submit variant (carries a hash).
-  if (!('transactionHash' in result))
-    throw new BaseError(
-      'Payer did not return a transaction hash for a `send`-mode sponsored transaction.',
-    )
-
   const receipt = await waitForTransactionReceipt(client, {
-    hash: result.transactionHash,
+    hash: transactionHash,
     ...(validBefore !== undefined ? { validBefore } : {}),
     ...(pollingInterval !== undefined ? { pollingInterval } : {}),
     ...(timeout !== undefined ? { timeout } : {}),
   })
 
-  return { ...result, receipt }
+  return { transactionHash, receipt }
 }

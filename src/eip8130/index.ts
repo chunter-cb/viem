@@ -119,6 +119,11 @@ export {
   assertTransaction,
 } from './utils/assertTransaction.js'
 export {
+  type GetTransactionHashErrorType,
+  type GetTransactionHashParameters,
+  getTransactionHash,
+} from './utils/getTransactionHash.js'
+export {
   type GetPayerSignatureHashErrorType,
   type GetSenderSignatureHashErrorType,
   type GetSignatureHashParameters,

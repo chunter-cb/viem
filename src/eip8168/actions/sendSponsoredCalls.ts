@@ -14,11 +14,12 @@ import type {
   TransactionSerializable8130,
   TransactionSerialized8130,
 } from '../../eip8130/types/transaction.js'
+import { getTransactionHash } from '../../eip8130/utils/getTransactionHash.js'
 import { serializeTransaction } from '../../eip8130/utils/serializeTransaction.js'
 import { BaseError } from '../../errors/base.js'
 import type { Account } from '../../types/account.js'
 import type { Chain } from '../../types/chain.js'
-import type { Hex } from '../../types/misc.js'
+import type { Hash, Hex } from '../../types/misc.js'
 import { hexToBigInt } from '../../utils/encoding/fromHex.js'
 import { numberToHex } from '../../utils/encoding/toHex.js'
 import type { PayerClient } from '../client.js'
@@ -145,9 +146,16 @@ export type SendSponsoredCallsParameters = {
    *
    * On a re-signed retry it fires again with the corrected transaction, so the
    * final invocation reflects the transaction that was actually submitted.
+   *
+   * `transactionHash` is the attempt's EIP-8130 transaction hash. It excludes
+   * both authorizations, so it is known here, before the payer responds, and
+   * can be used to find the transaction if the payer never reports back.
    */
   onTransaction?:
-    | ((transaction: TransactionSerializable8130) => void)
+    | ((
+        transaction: TransactionSerializable8130,
+        details: { transactionHash: Hash },
+      ) => void)
     | undefined
 }
 
@@ -157,6 +165,8 @@ export type SendSponsoredCallsSignReturnType = {
   payerAuth: Hex
   /** The fully signed transaction, ready for `eth_sendRawTransaction`. */
   signedTransaction: TransactionSerialized8130
+  /** The transaction hash `eth_sendRawTransaction` will return. */
+  transactionHash: Hash
 }
 
 export type SendSponsoredCallsReturnType =
@@ -175,6 +185,10 @@ export type SendSponsoredCallsReturnType =
  *    hand it to `payer_sendTransaction`, which co-signs and submits.
  * 5. `"sign"`: get `payer_auth` from `payer_signTransaction`, sign
  *    `sender_auth` with it in place, and return the signed transaction.
+ *
+ * Both modes return the EIP-8130 transaction hash computed locally from the
+ * body and resolved sender. It excludes `payer_auth`, so it does not depend
+ * on the payer reporting it.
  *
  * @example
  * const { transactionHash } = await sendSponsoredCalls(client, {
@@ -328,7 +342,11 @@ export async function sendSponsoredCalls(
     transaction.validBefore = computeValidBefore()
     transaction.payerAuth = '0x'
 
-    onTransaction?.(transaction)
+    const transactionHash = await getTransactionHash({
+      transaction,
+      sender: transaction.from ? undefined : account.address,
+    })
+    onTransaction?.(transaction, { transactionHash })
 
     try {
       if (mode === 'sign') {
@@ -345,13 +363,14 @@ export async function sendSponsoredCalls(
           ...transaction,
           payerAuth,
         })
-        return { payerAuth, signedTransaction }
+        return { payerAuth, signedTransaction, transactionHash }
       }
       const signedTransaction = await account.signTransaction(transaction)
-      return await payerClient.sendTransaction({
+      const result = await payerClient.sendTransaction({
         transaction: signedTransaction,
         context,
       })
+      return { ...result, transactionHash }
     } catch (error) {
       if (attempt >= retries) throw error
       const rejected = parsePayerError(error)

@@ -4,6 +4,7 @@ import { mainnet } from '../../chains/index.js'
 import { createClient } from '../../clients/createClient.js'
 import { custom } from '../../clients/transports/custom.js'
 import { erc20Abi } from '../../constants/abis.js'
+import { getTransactionHash } from '../../eip8130/utils/getTransactionHash.js'
 import { parseTransaction } from '../../eip8130/utils/parseTransaction.js'
 import { toAccount } from '../../experimental/keystore/accounts/toAccount.js'
 import { key } from '../../experimental/keystore/keys.js'
@@ -247,7 +248,12 @@ describe('sendTransaction', () => {
       },
       nonceSequence: 0n,
     })
-    expect(result).toHaveProperty('transactionHash')
+    // The hash excludes auth, so it is the locally computed one, not the
+    // payer's (here `keccak256` of the encoding).
+    expect(result.transactionHash).toBe(
+      await getTransactionHash({ transaction: relayed! }),
+    )
+    expect(result.transactionHash).not.toBe(keccak256(relayed!))
 
     const parsed = parseTransaction(relayed!)
     expect(parsed.payer?.toLowerCase()).toBe(PAYER.toLowerCase())
@@ -306,36 +312,54 @@ describe('sendTransaction', () => {
     expect(parsed.payerAuth).toBe(PAYER_AUTH)
     expect(parsed.senderAuth).not.toBe('0x')
     expect((result as { payerAuth: `0x${string}` }).payerAuth).toBe(PAYER_AUTH)
+    // The payer's co-signature does not change the hash.
+    expect(result.transactionHash).toBe(
+      await getTransactionHash({ transaction: cosigned! }),
+    )
+    expect(result.transactionHash).toBe(
+      await getTransactionHash({
+        transaction: (result as { signedTransaction: `0x${string}` })
+          .signedTransaction,
+      }),
+    )
   })
 })
 
 describe('sendTransactionSync', () => {
-  test('submits via payer then returns the awaited EIP-8130 receipt', async () => {
+  test('submits via payer then awaits the receipt by the local hash', async () => {
+    let relayed: `0x${string}` | undefined
     const RECEIPT = {
-      transactionHash: `0x${'ab'.repeat(32)}` as const,
       status: '0x1' as const,
       payer: PAYER,
       phaseStatuses: ['0x1'] as const,
     }
     // A sync send drives payer_sendTransaction, then polls the chain for the
-    // receipt; the mock chain resolves the receipt immediately.
+    // receipt under the locally computed hash.
     const client = createClient({
       chain: mainnet,
       transport: custom({
-        async request({ method }: { method: string }) {
+        async request({ method, params }: { method: string; params: any }) {
           if (method === 'eth_chainId') return '0x1'
           if (method === 'eth_call') return `0x${'0'.repeat(192)}`
           if (method === 'eth_getTransactionCount') return '0x0'
-          if (method === 'eth_getTransactionReceipt') return RECEIPT
+          if (method === 'eth_getTransactionReceipt') {
+            const hash = await getTransactionHash({ transaction: relayed! })
+            return params[0] === hash
+              ? { ...RECEIPT, transactionHash: hash }
+              : null
+          }
           throw new Error(`unexpected chain RPC: ${method}`)
         },
       }),
     })
+    // The payer reports a stale hash; it is not used.
     const payer = createPayerClient({
       transport: custom({
         async request({ method, params }: { method: string; params: any }) {
-          if (method === 'payer_sendTransaction')
-            return { transactionHash: RECEIPT.transactionHash }
+          if (method === 'payer_sendTransaction') {
+            relayed = params[0].transaction
+            return { transactionHash: keccak256(params[0].transaction) }
+          }
           throw new Error(`unexpected ${method}: ${JSON.stringify(params)}`)
         },
       }),
@@ -349,7 +373,9 @@ describe('sendTransactionSync', () => {
       nonceSequence: 0n,
     })
 
-    expect(transactionHash).toBe(RECEIPT.transactionHash)
+    expect(transactionHash).toBe(
+      await getTransactionHash({ transaction: relayed! }),
+    )
     expect(receipt.eip8130.phaseStatuses).toEqual(['0x1'])
     expect(receipt.eip8130.payer).toBe(PAYER)
   })

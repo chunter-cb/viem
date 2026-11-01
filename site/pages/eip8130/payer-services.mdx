@@ -82,7 +82,7 @@ const { capabilities } = await client.payer.prepareTransactionRequest({
 
 ### Awaiting the Receipt
 
-`sendTransactionSync` submits through the payer and then awaits the EIP-8130 receipt (threading the signed `validBefore` for fast expiry detection):
+`sendTransactionSync` submits through the payer and then awaits the EIP-8130 receipt (threading the signed `validBefore` for fast expiry detection). It waits on the [transaction hash](/eip8130/sending-a-transaction#compute-the-transaction-hash) computed locally from the body, which excludes `payer_auth`, so it does not rely on the payer reporting a hash. With `sendTransaction` and `sendSponsoredCalls`, `onTransaction` receives the same hash before each submit attempt.
 
 ```ts
 const { transactionHash, receipt } = await client.payer.sendTransactionSync({
